@@ -55,9 +55,13 @@ class SQLiteAsyncWriter:
                                     with open(filepath, "r", encoding="utf-8") as f:
                                         try: memory = json.load(f)
                                         except json.JSONDecodeError: pass
-                                memory.append(json.loads(data))
-                                with open(filepath, "w", encoding="utf-8") as f:
-                                    json.dump(memory, f, indent=2, ensure_ascii=False)
+                                
+                                new_data = json.loads(data)
+                                # V13 Idempotencia: Ha a crash miatt a fájlba már beleíródott, de a sorból nem törlődött, ne írjuk bele újra.
+                                if new_data not in memory:
+                                    memory.append(new_data)
+                                    with open(filepath, "w", encoding="utf-8") as f:
+                                        json.dump(memory, f, indent=2, ensure_ascii=False)
                             # ACK: Sikeres írás után töröljük a rekordot
                             cursor.execute("DELETE FROM pending_writes WHERE id = ?", (row_id,))
                             conn.commit()

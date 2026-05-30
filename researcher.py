@@ -9,6 +9,7 @@ import uuid
 import yaml
 import hashlib
 import re
+import difflib
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
@@ -271,70 +272,56 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                     )
                     extracted_claim_text = "Mocked Fact text for claim"
             
-            # Multi-Source Grounding (Dual-Grounding) ellenőrzése + Source Independence Check (ORCID/Hash alapú)
+            # Multi-Source Grounding (Dual-Grounding) ellenőrzése + Source Independence Check (ORCID/Hash + Fuzzy alapú)
             if valid_sources_for_claim:
                 independent_sources = []
                 seen_author_ids = set()
-                seen_author_details = [] # Telemetriához (boundary split)
                 
                 for src in valid_sources_for_claim:
                     # Determinisztikus deduplikáció: ORCID, vagy SHA-256 hash a normalizált szerzőből és intézményből
                     if src.author_id:
                         if src.author_id in seen_author_ids:
-                            # False-positive merge detektor ORCID esetén (nem jellemző, de logoljuk)
-                            if src.year:
-                                for prev in seen_author_details:
-                                    if prev.get("hash") == src.author_id and prev["year"]:
-                                        if abs(src.year - prev["year"]) >= 4: # Max eltérés egy 5 éves bucketen belül
-                                            state_manager.log_action(
-                                                session_id, "researcher", "suspicious_merge_detected",
-                                                {"author": src.authors, "inst": src.institution, "hash": src.author_id, "year1": prev["year"], "year2": src.year}
-                                            )
                             continue
                         independent_sources.append(src)
                         seen_author_ids.add(src.author_id)
-                        seen_author_details.append({"auth": src.author_id, "inst": "", "year": src.year, "hash": src.author_id})
                     else:
                         norm_auth = normalize_author(src.authors if src.authors else f"unknown_{src.source_id}")
                         norm_inst = normalize_institution(src.institution if src.institution else "")
-                        # Explicit "unknown" token a null email elkerülésére (determinista hash)
+                        # Explicit "unknown" token a null email elkerülésére
                         email_dom = src.email_domain.lower() if src.email_domain else "unknown"
                         
-                        # Single bucket (Kimi javaslatára a bloat elkerülése végett)
-                        if src.year:
-                            bucket = f"{(src.year // 5) * 5}-{(src.year // 5) * 5 + 4}"
-                        else:
-                            bucket = "unknown"
-                        
-                        combined_str = f"{norm_inst}|{norm_auth}|{email_dom}|{bucket}"
+                        # Identitás Hash: Évszám NÉLKÜL! (Egy szerző identitása független az évtől)
+                        combined_str = f"{norm_inst}|{norm_auth}|{email_dom}"
                         auth_id = hashlib.sha256(combined_str.encode('utf-8')).hexdigest()
                         
                         if auth_id in seen_author_ids:
-                            # False-positive merge detektor a hash ütközésekkor
-                            if src.year:
-                                for prev in seen_author_details:
-                                    if prev.get("hash") == auth_id and prev["year"]:
-                                        if abs(src.year - prev["year"]) >= 4: # BUCKET_WIDTH - 1
-                                            state_manager.log_action(
-                                                session_id, "researcher", "suspicious_merge_detected",
-                                                {"author": norm_auth, "inst": norm_inst, "hash": auth_id, "year1": prev["year"], "year2": src.year}
-                                            )
                             continue
                             
-                        # Telemetria vizsgálat (Boundary-split candidate detektálása)
-                        if src.year:
-                            for prev in seen_author_details:
-                                if prev["auth"] == norm_auth and prev["inst"] == norm_inst:
-                                    if prev["year"] and abs(src.year - prev["year"]) <= 5:
-                                        # Név és intézmény megegyezik, de a hash különbözött a bucket boundary miatt!
-                                        state_manager.log_action(
-                                            session_id, "researcher", "boundary_split_candidate",
-                                            {"author": norm_auth, "inst": norm_inst, "year1": prev["year"], "year2": src.year}
-                                        )
+                        # Fuzzy Merging (Ha a Hash nem egyezett pontosan, még lehet, hogy ugyanaz az ember)
+                        is_fuzzy_duplicate = False
+                        for prev_src in independent_sources:
+                            # Csak azokat vizsgáljuk, amiknek nincs ORCID-je (tehát string alapon lettek betéve)
+                            if not prev_src.author_id:
+                                prev_norm_auth = normalize_author(prev_src.authors if prev_src.authors else "")
+                                prev_norm_inst = normalize_institution(prev_src.institution if prev_src.institution else "")
+                                
+                                auth_sim = difflib.SequenceMatcher(None, norm_auth, prev_norm_auth).ratio()
+                                inst_sim = difflib.SequenceMatcher(None, norm_inst, prev_norm_inst).ratio()
+                                
+                                # Ha mind a név, mind az intézmény > 85%-ban egyezik
+                                if auth_sim >= 0.85 and inst_sim >= 0.85:
+                                    is_fuzzy_duplicate = True
+                                    state_manager.log_action(
+                                        session_id, "researcher", "fuzzy_merge_applied",
+                                        {"auth1": norm_auth, "auth2": prev_norm_auth, "sim": auth_sim}
+                                    )
+                                    break
+                                    
+                        if is_fuzzy_duplicate:
+                            continue
                             
                         independent_sources.append(src)
                         seen_author_ids.add(auth_id)
-                        seen_author_details.append({"auth": norm_auth, "inst": norm_inst, "year": src.year, "hash": auth_id})
                 
                 # V11: Weighted Multi-Factor Confidence Scorer
                 current_year = datetime.utcnow().year

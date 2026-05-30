@@ -5,20 +5,28 @@ from typing import Type, TypeVar, Callable, Any
 T = TypeVar('T', bound=BaseModel)
 
 def enforce_pydantic_schema(
-    llm_call_func: Callable[[str], str], 
+    llm_call_func: Callable[..., str], 
     schema_model: Type[T], 
     initial_prompt: str, 
-    max_retries: int = 3
+    max_retries: int = 3,
+    base_temperature: float = 0.5
 ) -> T:
     """
     LLM hívást burkoló retry mechanizmus, ami elkapja a Pydantic hálózatot,
     és token-hatékony JSON hibaüzenetekkel bombázza vissza az LLM-et, ha hibázik.
     Hard cap (max_retries) véd a végtelen hurkok ellen.
+    V13: Minden sikertelen iterációnál növeli a hőmérsékletet, hogy kimozduljon a determinisztikus zsákutcából.
     """
     current_prompt = initial_prompt
     
     for attempt in range(max_retries + 1):
-        raw_response = llm_call_func(current_prompt)
+        current_temp = min(base_temperature + (attempt * 0.3), 1.0) # V13 Temperature Scaling
+        
+        try:
+            raw_response = llm_call_func(current_prompt, temperature=current_temp)
+        except TypeError:
+            # Visszafelé kompatibilitás, ha a wrapper nem támogat kwargs-t
+            raw_response = llm_call_func(current_prompt)
         
         try:
             # Próbáljuk meg parszolni a választ

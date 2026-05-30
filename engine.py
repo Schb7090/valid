@@ -157,7 +157,7 @@ class UPVSEngine:
                         path_name = "super"
                         branches = ["prioritized"]
                         max_retries = 0
-                        active_personas = [] # Bypass
+                        active_personas = ["Grounding Verifier"] # Szigorított Bypass: csak a Grounding fut le
                     elif node_confidence >= 0.70:
                         path_name = "moderate"
                         branches = ["conservative"]
@@ -176,38 +176,44 @@ class UPVSEngine:
                     feedback = ""
                     best_overall_vetoed = None
                     
-                    while not node_approved and retries <= max_retries:
-                        # 4.1 Generálás (Dinamikus ágakkal)
-                        drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback, branches=branches)
-                        
-                        # 4.2 Tanács szavazás (Dinamikus personákkal)
-                        best_valid, best_vetoed, combined_feedback = council_session(node, drafts, state.task_context, self.state_manager, session_id, active_personas=active_personas)
-                        
-                        if best_valid:
-                            state.final_sections[node.id] = best_valid.draft_text
-                            state.completed_nodes.append(node.id)
-                            node_approved = True
-                        else:
-                            retries += 1
-                            feedback = combined_feedback
+                    try:
+                        while not node_approved and retries <= max_retries:
+                            # 4.1 Generálás (Dinamikus ágakkal)
+                            drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback, branches=branches)
                             
-                            # Nyomon követjük az összes iteráció legjobb, de vétózott draftját
-                            if not best_overall_vetoed or (best_vetoed and best_vetoed.average_score > best_overall_vetoed.average_score):
-                                best_overall_vetoed = best_vetoed
+                            # 4.2 Tanács szavazás (Dinamikus personákkal)
+                            best_valid, best_vetoed, combined_feedback = council_session(node, drafts, state.task_context, self.state_manager, session_id, active_personas=active_personas)
+                            
+                            if best_valid:
+                                state.final_sections[node.id] = best_valid.draft_text
+                                state.completed_nodes.append(node.id)
+                                node_approved = True
+                            else:
+                                retries += 1
+                                feedback = combined_feedback
+                                
+                                # Nyomon követjük az összes iteráció legjobb, de vétózott draftját
+                                if not best_overall_vetoed or (best_vetoed and best_vetoed.average_score > best_overall_vetoed.average_score):
+                                    best_overall_vetoed = best_vetoed
 
-                    if not node_approved:
-                        # Fallback Protokoll (Ha kimerült a max_retries)
-                        if best_overall_vetoed:
-                            fallback_text = f"{system_warning}\n\n{best_overall_vetoed.draft_text}"
-                        else:
-                            fallback_text = config_dict.get("fallback_action", {}).get("error_tag_placeholder", "[HIBA]")
-                            
-                        state.final_sections[node.id] = fallback_text
+                        if not node_approved:
+                            # Fallback Protokoll (Ha kimerült a max_retries)
+                            if best_overall_vetoed:
+                                fallback_text = f"{system_warning}\n\n{best_overall_vetoed.draft_text}"
+                            else:
+                                fallback_text = config_dict.get("fallback_action", {}).get("error_tag_placeholder", "[HIBA]")
+                                
+                            state.final_sections[node.id] = fallback_text
+                            state.completed_nodes.append(node.id)
+                            self.state_manager.log_action(session_id, "engine", "fallback_protocol_triggered", {
+                                "node_id": node.id, 
+                                "retries_exhausted": retries - 1
+                            })
+                    except Exception as e:
+                        # Graceful Degradation: Ne dőljön össze az egész folyamat egy rossz csomópont miatt
+                        self.state_manager.log_action(session_id, "engine", "node_degraded", {"node_id": node.id, "error": str(e)})
+                        state.final_sections[node.id] = f"[SYSTEM WARNING: Csomópont kihagyva degradált módban] Belső hiba: {e}"
                         state.completed_nodes.append(node.id)
-                        self.state_manager.log_action(session_id, "engine", "fallback_protocol_triggered", {
-                            "node_id": node.id, 
-                            "retries_exhausted": retries - 1
-                        })
 
                 self.state_manager.save_checkpoint(state)
 
