@@ -268,19 +268,35 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                 for src in valid_sources_for_claim:
                     # Determinisztikus deduplikáció: ORCID, vagy SHA-256 hash a normalizált szerzőből és intézményből
                     if src.author_id:
-                        auth_id = src.author_id
+                        if src.author_id in seen_author_ids:
+                            continue
+                        independent_sources.append(src)
+                        seen_author_ids.add(src.author_id)
                     else:
                         norm_auth = normalize_author(src.authors if src.authors else f"unknown_{src.source_id}")
                         norm_inst = normalize_institution(src.institution if src.institution else "")
+                        # Explicit "unknown" token a null email elkerülésére (determinista hash)
                         email_dom = src.email_domain.lower() if src.email_domain else "unknown"
-                        year_bracket = f"{(src.year // 5) * 5}-{(src.year // 5) * 5 + 4}" if src.year else "unknown"
                         
-                        combined_str = f"{norm_inst}|{norm_auth}|{email_dom}|{year_bracket}"
-                        auth_id = hashlib.sha256(combined_str.encode('utf-8')).hexdigest()
-                    
-                    if auth_id not in seen_author_ids:
+                        # Overlapping year buckets (boundary-split healing)
+                        # Pl. egy 2020-as cikk 5 darab 5-éves bucketbe is beletartozik (2016-2020 ... 2020-2024).
+                        if src.year:
+                            buckets = [f"{y}-{y+4}" for y in range(src.year - 4, src.year + 1)]
+                        else:
+                            buckets = ["unknown"]
+                        
+                        source_hashes = []
+                        for bucket in buckets:
+                            combined_str = f"{norm_inst}|{norm_auth}|{email_dom}|{bucket}"
+                            source_hashes.append(hashlib.sha256(combined_str.encode('utf-8')).hexdigest())
+                        
+                        # Ha a szerző bármelyik időablakával már találkoztunk, akkor duplikátum
+                        if any(h in seen_author_ids for h in source_hashes):
+                            continue
+                            
                         independent_sources.append(src)
-                        seen_author_ids.add(auth_id)
+                        # Hozzáadjuk az összes ablakot a látott kalaphoz, így a jövőbeli cikkekkel is összeolvad
+                        seen_author_ids.update(source_hashes)
                 
                 # A confidence score-alapú (0.0 - 1.0)
                 num_indep = len(independent_sources)
