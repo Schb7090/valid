@@ -1,0 +1,98 @@
+engine_parameters:
+  # 1. Intent Router
+  few_shot_limit: 3
+
+  # 2. DAG Reviewer
+  dag_reviewer_max_retries: 2
+  max_axiom_ratio: 0.3
+
+  # DAG Complexity → Node tartományok
+  dag_complexity_ranges:
+    micro: [3, 5]
+    small: [6, 12]
+    medium: [13, 25]
+    large: [26, 50]
+
+  # 3. Researcher
+  research:
+    quality_threshold: 40
+    api_calls_per_depth:
+      deep: 5
+      standard: 2
+      shallow: 1
+      none: 0
+    max_queries_per_node:
+      openalex: 3
+      arxiv: 2
+      pubmed: 2
+      web: 2
+
+  # 4. Multi-Branch Generator
+  generator_temperatures:
+    conservative: 0.1
+    critical: 0.4
+    synthetic: 0.7
+
+  # 5. Agent Council (Delphi) — Ágens-szintű küszöbök és hőmérsékletek
+  agent_council:
+    temperatures:
+      "Domain Expert": 0.1
+      "Logical Arc Auditor": 0.0
+      "De-biaser": 0.1
+      "Grounding Verifier": 0.0
+    defaults_strict:
+      domain_expert_veto: 60
+      debiaser_veto: 40
+      grounding_verifier_veto: 90
+      max_variance: 15
+    defaults_relaxed:
+      domain_expert_veto: 30
+      debiaser_veto: 20
+      grounding_verifier_veto: 0
+      max_variance: 25
+
+  # 6. Grounding szintek
+  grounding:
+    strict: 0.90    # 90% tények hivatkozva
+    moderate: 0.60  # 60% tények hivatkozva
+    none: 0.0       # nincs kényszer
+
+  # 7. Fallback (HITL-mentes, autonóm)
+  fallback_action: "continue_with_error_tag"
+  fallback_max_retries: 3
+  council_max_retries: 3
+  system_warning_tag: "[SYSTEM WARNING: A válasz 3 iteráció után sem felelt meg a 100%-os logikai konzisztenciának a Council szerint. A leginkább elfogadható ág került szintetizálásra.]"
+  error_tag_placeholder: "[KIÉRTÉKELÉSI HIBA — A szekció nem bizonyítható az elérhető forrásokból]"
+
+  # 8. Output Assembly
+  citation_style: "APA"
+
+  # 9. Biztonsági háló — ha a Router bizonytalan
+  ambiguous_default:
+    task_type: "analytical_report"
+    research_depth: "deep"
+    grounding_level: "strict"
+    dag_complexity: "medium"
+    target_audience: "professional"
+    assembly_freedom: "strict"
+
+prompts:
+  debias_checklist:
+    - "sycophancy"
+    - "confirmation_bias"
+    - "anchoring"
+    - "false_balance"
+    - "appeal_to_authority"
+    - "hedging_overuse"
+    - "ai_cliche"
+    - "scope_creep"
+
+  fallacy_checklist:
+    - "post_hoc_ergo_propter_hoc"
+    - "straw_man"
+    - "circular_reasoning"
+    - "false_dilemma"
+    - "non_sequitur"
+    - "ad_hominem"
+    - "slippery_slope"
+    - "hasty_generalization"
