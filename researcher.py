@@ -274,7 +274,7 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             if src.year:
                                 for prev in seen_author_details:
                                     if prev.get("hash") == src.author_id and prev["year"]:
-                                        if abs(src.year - prev["year"]) >= 5:
+                                        if abs(src.year - prev["year"]) >= 4: # Max eltérés egy 5 éves bucketen belül
                                             state_manager.log_action(
                                                 session_id, "researcher", "suspicious_merge_detected",
                                                 {"author": src.authors, "inst": src.institution, "hash": src.author_id, "year1": prev["year"], "year2": src.year}
@@ -303,7 +303,7 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             if src.year:
                                 for prev in seen_author_details:
                                     if prev.get("hash") == auth_id and prev["year"]:
-                                        if abs(src.year - prev["year"]) >= 5:
+                                        if abs(src.year - prev["year"]) >= 4: # BUCKET_WIDTH - 1
                                             state_manager.log_action(
                                                 session_id, "researcher", "suspicious_merge_detected",
                                                 {"author": norm_auth, "inst": norm_inst, "hash": auth_id, "year1": prev["year"], "year2": src.year}
