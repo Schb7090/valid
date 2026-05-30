@@ -139,18 +139,37 @@ class UPVSEngine:
                     self._reload_config(state)
                     self.check_token_limit(state)
                     
-                    # 4.0 Generálási Stratégia (Prioritized vs Batch)
+                    # 4.0 Generálási Stratégia (V12: 3-Tier Routing)
                     facts = get_facts_for_node(self.state_manager.db_path, node.id)
                     
-                    is_super_confident = False
-                    if facts and all(f.confidence >= 0.85 for f in facts):
-                        is_super_confident = True
+                    if facts:
+                        node_confidence = min(f.confidence for f in facts)
+                    else:
+                        node_confidence = 0.0
                     
                     with open(self.config_path, "r", encoding="utf-8") as f:
                         config_dict = yaml.safe_load(f)
                         
-                    max_retries = config_dict.get("fallback_action", {}).get("council_max_retries", 3)
                     system_warning = config_dict.get("fallback_action", {}).get("system_warning_tag", "[SYSTEM WARNING: Válasz nem konzisztens.]")
+                    
+                    # 3-Tier Routing Logika
+                    if node_confidence >= 0.85:
+                        path_name = "super"
+                        branches = ["prioritized"]
+                        max_retries = 0
+                        active_personas = [] # Bypass
+                    elif node_confidence >= 0.70:
+                        path_name = "moderate"
+                        branches = ["conservative"]
+                        max_retries = 0
+                        active_personas = ["Domain Expert"] # Csak 1 persona
+                    else:
+                        path_name = "weak"
+                        branches = ["conservative", "critical", "synthetic"]
+                        max_retries = config_dict.get("fallback_action", {}).get("council_max_retries", 3)
+                        active_personas = None # Mind a 4 persona
+                        
+                    self.state_manager.log_action(session_id, "engine", "routing_decision", {"node_id": node.id, "confidence": node_confidence, "path": path_name})
                     
                     retries = 0
                     node_approved = False
@@ -158,16 +177,11 @@ class UPVSEngine:
                     best_overall_vetoed = None
                     
                     while not node_approved and retries <= max_retries:
-                        # 4.1 Generálás
-                        if is_super_confident:
-                            # Prioritized Single-Draft (Nincs 3 ágú batching)
-                            drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback, branches=["prioritized"])
-                        else:
-                            # Hagyományos 3 ágú generálás (Batchinghez)
-                            drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback)
+                        # 4.1 Generálás (Dinamikus ágakkal)
+                        drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback, branches=branches)
                         
-                        # 4.2 Tanács szavazás
-                        best_valid, best_vetoed, combined_feedback = council_session(node, drafts, state.task_context, self.state_manager, session_id)
+                        # 4.2 Tanács szavazás (Dinamikus personákkal)
+                        best_valid, best_vetoed, combined_feedback = council_session(node, drafts, state.task_context, self.state_manager, session_id, active_personas=active_personas)
                         
                         if best_valid:
                             state.final_sections[node.id] = best_valid.draft_text

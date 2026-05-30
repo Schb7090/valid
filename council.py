@@ -88,11 +88,24 @@ def verify_grounding_deterministic(draft_text: str, facts: List[FactRecord], gro
         
     return 100, False, "A [fact_id] hivatkozások formai és mennyiségi szintje megfelelő."
 
-def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, context: TaskContext, state_manager: StateManager, session_id: str) -> List[DelphiDraftResult]:
+def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, context: TaskContext, state_manager: StateManager, session_id: str, active_personas: Optional[List[str]] = None) -> List[DelphiDraftResult]:
     """A 4 ágens kiértékeli az összes draftot egyetlen (vagy 4) hívással draftonkénti 4 hívás helyett."""
     config_path = Path(__file__).parent / "config.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+        
+    # V12 Bypass Logika (Ha nincs persona, automatikus 100 pontos jóváhagyás LLM hívás nélkül)
+    if active_personas is not None and len(active_personas) == 0:
+        return [
+            DelphiDraftResult(
+                draft_id=state_manager.generate_hash(draft["text"]),
+                draft_text=draft["text"],
+                branch_type=draft["branch"],
+                evaluations=[],
+                average_score=100.0,
+                is_vetoed=False
+            ) for draft in drafts
+        ]
         
     temperatures = config["engine_parameters"]["agent_council"].get("temperatures", {})
     profiles = get_agent_profiles()
@@ -107,6 +120,9 @@ def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, co
     draft_evals = [[] for _ in drafts]
     
     for agent_name, agent_desc in profiles.items():
+        if active_personas is not None and agent_name not in active_personas:
+            continue
+            
         if agent_name == "Grounding Verifier":
             required_ratio = 0.9 if context.grounding_level == "strict" else 0.6
             for i, draft in enumerate(drafts):
@@ -201,12 +217,12 @@ def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, co
         
     return results
 
-def council_session(node: ArgumentNode, drafts: List[Dict[str, str]], context: TaskContext, state_manager: StateManager, session_id: str) -> Tuple[Optional[DelphiDraftResult], Optional[DelphiDraftResult], str]:
+def council_session(node: ArgumentNode, drafts: List[Dict[str, str]], context: TaskContext, state_manager: StateManager, session_id: str, active_personas: Optional[List[str]] = None) -> Tuple[Optional[DelphiDraftResult], Optional[DelphiDraftResult], str]:
     """
     Lefuttatja a tanácsot a node-hoz tartozó draftokon kötegelve. 
     Visszaadja: (best_valid_draft, best_vetoed_draft, combined_feedback)
     """
-    results = evaluate_drafts_batched(drafts, node, context, state_manager, session_id)
+    results = evaluate_drafts_batched(drafts, node, context, state_manager, session_id, active_personas)
         
     state_manager.log_action(session_id, "council", "evaluations_completed", {"node_id": node.id, "draft_results": [{"branch": r.branch_type, "score": r.average_score, "veto": r.is_vetoed} for r in results]})
 
