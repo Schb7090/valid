@@ -8,7 +8,7 @@ def enforce_pydantic_schema(
     llm_call_func: Callable[[str], str], 
     schema_model: Type[T], 
     initial_prompt: str, 
-    max_retries: int = 2
+    max_retries: int = 3
 ) -> T:
     """
     LLM hívást burkoló retry mechanizmus, ami elkapja a Pydantic hálózatot,
@@ -44,7 +44,8 @@ def enforce_pydantic_schema(
                 structured_errors.append({
                     "field": ".".join(str(loc) for loc in err["loc"]),
                     "error": err["type"],
-                    "msg": err["msg"]
+                    "expected": err.get("msg", ""),
+                    "received": err.get("input", "unknown")
                 })
             
             error_json_str = json.dumps(structured_errors, ensure_ascii=False)

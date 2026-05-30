@@ -270,10 +270,19 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                     # Determinisztikus deduplikáció: ORCID, vagy SHA-256 hash a normalizált szerzőből és intézményből
                     if src.author_id:
                         if src.author_id in seen_author_ids:
+                            # False-positive merge detektor ORCID esetén (nem jellemző, de logoljuk)
+                            if src.year:
+                                for prev in seen_author_details:
+                                    if prev.get("hash") == src.author_id and prev["year"]:
+                                        if abs(src.year - prev["year"]) > 3:
+                                            state_manager.log_action(
+                                                session_id, "researcher", "suspicious_merge_detected",
+                                                {"author": src.authors, "inst": src.institution, "hash": src.author_id, "year1": prev["year"], "year2": src.year}
+                                            )
                             continue
                         independent_sources.append(src)
                         seen_author_ids.add(src.author_id)
-                        seen_author_details.append({"auth": src.author_id, "inst": "", "year": src.year})
+                        seen_author_details.append({"auth": src.author_id, "inst": "", "year": src.year, "hash": src.author_id})
                     else:
                         norm_auth = normalize_author(src.authors if src.authors else f"unknown_{src.source_id}")
                         norm_inst = normalize_institution(src.institution if src.institution else "")
@@ -290,6 +299,15 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                         auth_id = hashlib.sha256(combined_str.encode('utf-8')).hexdigest()
                         
                         if auth_id in seen_author_ids:
+                            # False-positive merge detektor a hash ütközésekkor
+                            if src.year:
+                                for prev in seen_author_details:
+                                    if prev.get("hash") == auth_id and prev["year"]:
+                                        if abs(src.year - prev["year"]) > 3:
+                                            state_manager.log_action(
+                                                session_id, "researcher", "suspicious_merge_detected",
+                                                {"author": norm_auth, "inst": norm_inst, "hash": auth_id, "year1": prev["year"], "year2": src.year}
+                                            )
                             continue
                             
                         # Telemetria vizsgálat (Boundary-split candidate detektálása)
@@ -305,7 +323,7 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             
                         independent_sources.append(src)
                         seen_author_ids.add(auth_id)
-                        seen_author_details.append({"auth": norm_auth, "inst": norm_inst, "year": src.year})
+                        seen_author_details.append({"auth": norm_auth, "inst": norm_inst, "year": src.year, "hash": auth_id})
                 
                 # A confidence score-alapú (0.0 - 1.0)
                 num_indep = len(independent_sources)
