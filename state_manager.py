@@ -10,34 +10,56 @@ from pathlib import Path
 # FONTOS: A models importálás a helyi models.py fájlból történik
 from models import UPVSEngineState
 
-class FileLock:
-    """Aszinkron/konkurens fájlzárolás exponenciális várakozási idővel (Exponential Backoff)."""
-    def __init__(self, lock_file: str, timeout: int = 15):
-        self.lock_file = lock_file
-        self.timeout = timeout
-        self.fd = None
+import asyncio
+import threading
 
-    def __enter__(self):
-        start_time = time.time()
-        backoff = 0.1
+class AsyncWriter:
+    """
+    Háttérszálon futó, Asyncio Queue alapú író mechanizmus.
+    Eltünteti a FileLock okozta szűk keresztmetszetet (overhead), így a JSON
+    memóriamedencék és checkpointok írása non-blocking módon, azonnal lefut.
+    """
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.queue = asyncio.Queue()
+        self.thread = threading.Thread(target=self._start_loop, daemon=True)
+        self.thread.start()
+
+    def _start_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self._worker())
+
+    async def _worker(self):
         while True:
+            task, args = await self.queue.get()
             try:
-                # O_EXCL biztosítja, hogy csak egy process/thread tudja létrehozni a fájlt
-                self.fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                return self
-            except FileExistsError:
-                if time.time() - start_time > self.timeout:
-                    raise TimeoutError(f"Nem sikerült zárolni a fájlt ({self.lock_file}) {self.timeout} mp után sem. Valószínűleg beragadt egy másik LLM.")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 2.0) # Exponenciális növekmény max 2 másodpercig
+                if task == "write_json":
+                    filepath, data = args
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(data)
+                elif task == "append_json":
+                    filepath, data = args
+                    memory = []
+                    if os.path.exists(filepath):
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            try: memory = json.load(f)
+                            except json.JSONDecodeError: pass
+                    memory.append(data)
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        json.dump(memory, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                print(f"AsyncWriter hiba: {e}")
+            finally:
+                self.queue.task_done()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.fd is not None:
-            os.close(self.fd)
-            try:
-                os.remove(self.lock_file)
-            except OSError:
-                pass
+    def submit_write_json(self, filepath: str, data_str: str):
+        self.loop.call_soon_threadsafe(self.queue.put_nowait, ("write_json", (filepath, data_str)))
+
+    def submit_append_json(self, filepath: str, data_dict: dict):
+        self.loop.call_soon_threadsafe(self.queue.put_nowait, ("append_json", (filepath, data_dict)))
+
+# Globális singleton példány az aszinkron íróhoz
+async_writer = AsyncWriter()
 
 
 class StateManager:
@@ -61,8 +83,10 @@ class StateManager:
         self._init_db()
 
     def get_db_connection(self):
-        """SQLite kapcsolat beépített várakozási idővel a párhuzamos LLM hívásokhoz."""
-        return sqlite3.connect(self.db_path, timeout=15.0)
+        """SQLite kapcsolat WAL móddal (konkurens olvasás/írás blokkolás nélkül)."""
+        conn = sqlite3.connect(self.db_path, timeout=15.0)
+        conn.execute('PRAGMA journal_mode=WAL;')
+        return conn
 
     def _init_db(self):
         """Inicializálja az SQLite sémákat a cache-hez, audit naplóhoz és fact store-hoz."""
@@ -148,23 +172,9 @@ class StateManager:
         base_dir.mkdir(parents=True, exist_ok=True)
         
         mem_file = base_dir / f"{agent_name}_memory.json"
-        lock_file = base_dir / f"{agent_name}_memory.lock"
-        
-        # Zároljuk a fájlt, ha két egyforma LLM egyszerre akarja írni (pl. multi-branch generator)
-        with FileLock(str(lock_file)):
-            memory = []
-            if mem_file.exists():
-                with open(mem_file, "r", encoding="utf-8") as f:
-                    try:
-                        memory = json.load(f)
-                    except json.JSONDecodeError:
-                        pass
-            
-            data["timestamp"] = datetime.utcnow().isoformat()
-            memory.append(data)
-            
-            with open(mem_file, "w", encoding="utf-8") as f:
-                json.dump(memory, f, indent=2, ensure_ascii=False)
+        # FileLock helyett az AsyncWriter-nek küldjük be a feladatot (Non-blocking)
+        data["timestamp"] = datetime.utcnow().isoformat()
+        async_writer.submit_append_json(str(mem_file), data)
 
     # --- Cache Kezelő Metódusok ---
 
@@ -215,13 +225,9 @@ class StateManager:
     # --- State Checkpointing (Pydantic <-> JSON) ---
 
     def save_checkpoint(self, state: UPVSEngineState):
-        """Kimenti a teljes állapotgépet JSON fájlba a session_id alapján. Szintén zárolt."""
+        """Kimenti a teljes állapotgépet JSON fájlba a session_id alapján. AsyncQueue-t használ FileLock helyett."""
         file_path = os.path.join(self.checkpoint_dir, f"{state.session_id}.json")
-        lock_path = os.path.join(self.checkpoint_dir, f"{state.session_id}.lock")
-        
-        with FileLock(lock_path):
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(state.model_dump_json(indent=2))
+        async_writer.submit_write_json(file_path, state.model_dump_json(indent=2))
             
     def load_checkpoint(self, session_id: str) -> Optional[UPVSEngineState]:
         """Visszatölti az állapotgépet megszakadás esetén."""

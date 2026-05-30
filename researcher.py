@@ -7,6 +7,7 @@ import sqlite3
 import json
 import uuid
 import yaml
+import hashlib
 from pathlib import Path
 from typing import List, Tuple
 
@@ -95,6 +96,7 @@ def mock_fetch_from_apis(query: str, depth: str, config: dict) -> List[dict]:
             "source_id": f"src_{uuid.uuid4().hex[:8]}",
             "title": f"Tanulmány: {query} 1",
             "authors": "Dr. Smith",
+            "author_id": "0000-0002-1825-0097", # ORCID Mock
             "institution": "Harvard",
             "source_type": "journal",
             "context": f"Ez egy szintetizált mock tartalom, ami bizonyítja ezt a keresést: {query}"
@@ -103,6 +105,7 @@ def mock_fetch_from_apis(query: str, depth: str, config: dict) -> List[dict]:
             "source_id": f"src_{uuid.uuid4().hex[:8]}",
             "title": f"Tanulmány: {query} 2",
             "authors": "Prof. Miller",
+            "author_id": "0000-0001-2345-6789", # ORCID Mock
             "institution": "MIT",
             "source_type": "journal",
             "context": f"Második független forrás a kereséshez: {query}"
@@ -202,6 +205,7 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             source_id=raw_src["source_id"],
                             title=raw_src["title"],
                             authors=raw_src.get("authors", "Ismeretlen Szerző"),
+                            author_id=raw_src.get("author_id"),
                             institution=raw_src.get("institution", "Ismeretlen Intézmény"),
                             source_type=raw_src["source_type"],
                             quality=quality
@@ -224,18 +228,22 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                     )
                     extracted_claim_text = "Mocked Fact text for claim"
             
-            # Multi-Source Grounding (Dual-Grounding) ellenőrzése + Source Independence Check
+            # Multi-Source Grounding (Dual-Grounding) ellenőrzése + Source Independence Check (ORCID/Hash alapú)
             if valid_sources_for_claim:
                 independent_sources = []
-                seen_authors = set()
+                seen_author_ids = set()
                 
                 for src in valid_sources_for_claim:
-                    # Csak szerző-szintű deduplikáció a körkörös idézések ellen
-                    auth = src.authors if src.authors else f"unknown_{src.source_id}"
+                    # Determinisztikus deduplikáció: ORCID, vagy MD5 hash a szerző(k)ből
+                    if src.author_id:
+                        auth_id = src.author_id
+                    else:
+                        auth_string = src.authors if src.authors else f"unknown_{src.source_id}"
+                        auth_id = hashlib.md5(auth_string.encode('utf-8')).hexdigest()
                     
-                    if auth not in seen_authors:
+                    if auth_id not in seen_author_ids:
                         independent_sources.append(src)
-                        seen_authors.add(auth)
+                        seen_author_ids.add(auth_id)
                 
                 # A confidence score-alapú (0.0 - 1.0)
                 num_indep = len(independent_sources)

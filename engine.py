@@ -139,22 +139,12 @@ class UPVSEngine:
                     self._reload_config(state)
                     self.check_token_limit(state)
                     
-                    # 4.0 Council Bypass Logika (Score-alapú)
+                    # 4.0 Generálási Stratégia (Prioritized vs Batch)
                     facts = get_facts_for_node(self.state_manager.db_path, node.id)
-                    requires_council = False
-                    if not facts:
-                        requires_council = True
-                    else:
-                        requires_council = any(f.confidence < 0.7 for f in facts)
                     
-                    if not requires_council:
-                        # Nincs szükség a Delphi Councilra, mert a tények magabiztossága magas (0.7+)
-                        # Generálunk egyetlen Szintetikus ágat, és továbblépünk.
-                        drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, branches=["synthetic"])
-                        state.final_sections[node.id] = drafts[0]["text"]
-                        state.completed_nodes.append(node.id)
-                        self.state_manager.log_action(session_id, "engine", "council_bypassed", {"node_id": node.id, "reason": "All facts score >= 0.7"})
-                        continue
+                    is_super_confident = False
+                    if facts and all(f.confidence >= 0.85 for f in facts):
+                        is_super_confident = True
                     
                     with open(self.config_path, "r", encoding="utf-8") as f:
                         config_dict = yaml.safe_load(f)
@@ -168,8 +158,13 @@ class UPVSEngine:
                     best_overall_vetoed = None
                     
                     while not node_approved and retries <= max_retries:
-                        # 4.1 Generálás (3 draft, feedback-kel)
-                        drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback)
+                        # 4.1 Generálás
+                        if is_super_confident:
+                            # Prioritized Single-Draft (Nincs 3 ágú batching)
+                            drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback, branches=["prioritized"])
+                        else:
+                            # Hagyományos 3 ágú generálás (Batchinghez)
+                            drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback)
                         
                         # 4.2 Tanács szavazás
                         best_valid, best_vetoed, combined_feedback = council_session(node, drafts, state.task_context, self.state_manager, session_id)

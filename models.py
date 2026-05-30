@@ -87,6 +87,7 @@ class SourceRecord(BaseModel):
     source_id: str
     title: str
     authors: Optional[str] = None
+    author_id: Optional[str] = None
     institution: Optional[str] = None
     year: Optional[int] = None
     doi: Optional[str] = None
@@ -122,9 +123,10 @@ class EdgeAuditResult(BaseModel):
 
 class SectionEvaluation(BaseModel):
     agent_name: str
+    thought_process: str
     scores: Dict[str, int]
-    reasoning: str
     veto_raised: bool = False
+    conclusion: str
 
 class DelphiDraftResult(BaseModel):
     draft_id: str

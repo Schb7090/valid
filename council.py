@@ -34,15 +34,17 @@ Csomópont állítása (Claim): {claim}
   "evaluations": [
     {{
       "draft_index": 0,
+      "thought_process": "Lépésről-lépésre elemzés: Először is megvizsgálom a premisszákat...",
       "score": 85,
-      "reasoning": "Részletes indoklás, miért adtad ezt a pontszámot a 0. drafthoz. Milyen hibákat találtál?",
-      "veto_raised": false
+      "veto_raised": false,
+      "conclusion": "Összefoglalva: A szöveg megfelelő, kisebb stilisztikai hibákkal."
     }},
     {{
       "draft_index": 1,
+      "thought_process": "...",
       "score": 40,
-      "reasoning": "...",
-      "veto_raised": true
+      "veto_raised": true,
+      "conclusion": "Vétó, mert hiányzik a logikai ív."
     }}
   ]
 }}
@@ -109,7 +111,13 @@ def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, co
             required_ratio = 0.9 if context.grounding_level == "strict" else 0.6
             for i, draft in enumerate(drafts):
                 score, veto, reason = verify_grounding_deterministic(draft["text"], facts, context.grounding_level, required_ratio)
-                draft_evals[i].append(SectionEvaluation(agent_name=agent_name, scores={"grounding": score}, reasoning=reason, veto_raised=veto))
+                draft_evals[i].append(SectionEvaluation(
+                    agent_name=agent_name, 
+                    thought_process="Automatikus determinisztikus futás.",
+                    scores={"grounding": score}, 
+                    veto_raised=veto,
+                    conclusion=reason
+                ))
             continue
             
         prompt = COUNCIL_SYSTEM_PROMPT.format(
@@ -129,7 +137,7 @@ def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, co
                 data = json.loads(cached)
             else:
                 # LLM MOCK
-                data = {"evaluations": [{"draft_index": i, "score": 85, "reasoning": "Mocked LLM batched evaluation pass.", "veto_raised": False} for i in range(len(drafts))]}
+                data = {"evaluations": [{"draft_index": i, "thought_process": "Mocked CoT", "score": 85, "veto_raised": False, "conclusion": "Mocked LLM batched evaluation pass."} for i in range(len(drafts))]}
                 
             for eval_data in data.get("evaluations", []):
                 i = eval_data.get("draft_index", 0)
@@ -146,9 +154,10 @@ def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, co
                     
                 draft_evals[i].append(SectionEvaluation(
                     agent_name=agent_name,
+                    thought_process=eval_data.get("thought_process", ""),
                     scores={"overall": score},
-                    reasoning=eval_data.get("reasoning", ""),
-                    veto_raised=veto
+                    veto_raised=veto,
+                    conclusion=eval_data.get("conclusion", "")
                 ))
                 
                 agent_temp = temperatures.get(agent_name, 0.0)
@@ -160,13 +169,20 @@ def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, co
                         "draft_index": i,
                         "score": score,
                         "veto": veto,
-                        "reasoning": eval_data.get("reasoning", ""),
+                        "thought_process": eval_data.get("thought_process", ""),
+                        "conclusion": eval_data.get("conclusion", ""),
                         "temperature": agent_temp
                     }
                 )
         except Exception as e:
             for i in range(len(drafts)):
-                draft_evals[i].append(SectionEvaluation(agent_name=agent_name, scores={"overall": 0}, reasoning=f"Parse Error: {e}", veto_raised=True))
+                draft_evals[i].append(SectionEvaluation(
+                    agent_name=agent_name, 
+                    thought_process="Hiba történt.", 
+                    scores={"overall": 0}, 
+                    veto_raised=True, 
+                    conclusion=f"Parse Error: {e}"
+                ))
                 
     results = []
     for i, draft in enumerate(drafts):
@@ -206,7 +222,7 @@ def council_session(node: ArgumentNode, drafts: List[Dict[str, str]], context: T
         feedbacks = []
         for ev in best_vetoed.evaluations:
             if ev.veto_raised:
-                feedbacks.append(f"- {ev.agent_name}: {ev.reasoning}")
+                feedbacks.append(f"- {ev.agent_name}: {ev.thought_process} -> {ev.conclusion}")
         combined_feedback = "\n".join(feedbacks)
         
     return best_valid, best_vetoed, combined_feedback
