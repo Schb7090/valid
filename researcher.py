@@ -264,6 +264,7 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
             if valid_sources_for_claim:
                 independent_sources = []
                 seen_author_ids = set()
+                seen_author_details = [] # Telemetriához (boundary split)
                 
                 for src in valid_sources_for_claim:
                     # Determinisztikus deduplikáció: ORCID, vagy SHA-256 hash a normalizált szerzőből és intézményből
@@ -272,31 +273,39 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             continue
                         independent_sources.append(src)
                         seen_author_ids.add(src.author_id)
+                        seen_author_details.append({"auth": src.author_id, "inst": "", "year": src.year})
                     else:
                         norm_auth = normalize_author(src.authors if src.authors else f"unknown_{src.source_id}")
                         norm_inst = normalize_institution(src.institution if src.institution else "")
                         # Explicit "unknown" token a null email elkerülésére (determinista hash)
                         email_dom = src.email_domain.lower() if src.email_domain else "unknown"
                         
-                        # Overlapping year buckets (boundary-split healing)
-                        # Pl. egy 2020-as cikk 5 darab 5-éves bucketbe is beletartozik (2016-2020 ... 2020-2024).
+                        # Single bucket (Kimi javaslatára a bloat elkerülése végett)
                         if src.year:
-                            buckets = [f"{y}-{y+4}" for y in range(src.year - 4, src.year + 1)]
+                            bucket = f"{(src.year // 5) * 5}-{(src.year // 5) * 5 + 4}"
                         else:
-                            buckets = ["unknown"]
+                            bucket = "unknown"
                         
-                        source_hashes = []
-                        for bucket in buckets:
-                            combined_str = f"{norm_inst}|{norm_auth}|{email_dom}|{bucket}"
-                            source_hashes.append(hashlib.sha256(combined_str.encode('utf-8')).hexdigest())
+                        combined_str = f"{norm_inst}|{norm_auth}|{email_dom}|{bucket}"
+                        auth_id = hashlib.sha256(combined_str.encode('utf-8')).hexdigest()
                         
-                        # Ha a szerző bármelyik időablakával már találkoztunk, akkor duplikátum
-                        if any(h in seen_author_ids for h in source_hashes):
+                        if auth_id in seen_author_ids:
                             continue
                             
+                        # Telemetria vizsgálat (Boundary-split candidate detektálása)
+                        if src.year:
+                            for prev in seen_author_details:
+                                if prev["auth"] == norm_auth and prev["inst"] == norm_inst:
+                                    if prev["year"] and abs(src.year - prev["year"]) <= 5:
+                                        # Név és intézmény megegyezik, de a hash különbözött a bucket boundary miatt!
+                                        state_manager.log_action(
+                                            session_id, "researcher", "boundary_split_candidate",
+                                            {"author": norm_auth, "inst": norm_inst, "year1": prev["year"], "year2": src.year}
+                                        )
+                            
                         independent_sources.append(src)
-                        # Hozzáadjuk az összes ablakot a látott kalaphoz, így a jövőbeli cikkekkel is összeolvad
-                        seen_author_ids.update(source_hashes)
+                        seen_author_ids.add(auth_id)
+                        seen_author_details.append({"auth": norm_auth, "inst": norm_inst, "year": src.year})
                 
                 # A confidence score-alapú (0.0 - 1.0)
                 num_indep = len(independent_sources)
