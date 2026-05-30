@@ -10,56 +10,54 @@ from pathlib import Path
 # FONTOS: A models importálás a helyi models.py fájlból történik
 from models import UPVSEngineState
 
-import asyncio
 import threading
 
-class AsyncWriter:
+class SQLiteAsyncWriter:
     """
-    Háttérszálon futó, Asyncio Queue alapú író mechanizmus.
-    Eltünteti a FileLock okozta szűk keresztmetszetet (overhead), így a JSON
-    memóriamedencék és checkpointok írása non-blocking módon, azonnal lefut.
+    Háttérszálon futó, SQLite tábla alapú író mechanizmus.
+    Perzisztensen tárolja a feldolgozásra váró lemezműveleteket, így
+    crash-safe, de a főszálat nem blokkolja.
     """
-    def __init__(self):
-        self.loop = asyncio.new_event_loop()
-        self.queue = asyncio.Queue()
-        self.thread = threading.Thread(target=self._start_loop, daemon=True)
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.running = True
+        self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
-    def _start_loop(self):
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(self._worker())
-
-    async def _worker(self):
-        while True:
-            task, args = await self.queue.get()
+    def _worker(self):
+        while self.running:
             try:
-                if task == "write_json":
-                    filepath, data = args
-                    with open(filepath, "w", encoding="utf-8") as f:
-                        f.write(data)
-                elif task == "append_json":
-                    filepath, data = args
-                    memory = []
-                    if os.path.exists(filepath):
-                        with open(filepath, "r", encoding="utf-8") as f:
-                            try: memory = json.load(f)
-                            except json.JSONDecodeError: pass
-                    memory.append(data)
-                    with open(filepath, "w", encoding="utf-8") as f:
-                        json.dump(memory, f, indent=2, ensure_ascii=False)
+                with sqlite3.connect(self.db_path, timeout=15.0) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, task_type, filepath, data FROM pending_writes ORDER BY id ASC LIMIT 1")
+                    row = cursor.fetchone()
+                    if row:
+                        row_id, task, filepath, data = row
+                        try:
+                            if task == "write_json":
+                                with open(filepath, "w", encoding="utf-8") as f:
+                                    f.write(data)
+                            elif task == "append_json":
+                                memory = []
+                                if os.path.exists(filepath):
+                                    with open(filepath, "r", encoding="utf-8") as f:
+                                        try: memory = json.load(f)
+                                        except json.JSONDecodeError: pass
+                                memory.append(json.loads(data))
+                                with open(filepath, "w", encoding="utf-8") as f:
+                                    json.dump(memory, f, indent=2, ensure_ascii=False)
+                            # ACK: Sikeres írás után töröljük a rekordot
+                            cursor.execute("DELETE FROM pending_writes WHERE id = ?", (row_id,))
+                            conn.commit()
+                        except Exception as e:
+                            print(f"SQLiteAsyncWriter IO hiba: {e}")
+                            # Hibás rekord eldobása, hogy ne akassza meg végleg a sort
+                            cursor.execute("DELETE FROM pending_writes WHERE id = ?", (row_id,))
+                            conn.commit()
+                    else:
+                        time.sleep(0.1) # Polling várakozás, ha üres a sor
             except Exception as e:
-                print(f"AsyncWriter hiba: {e}")
-            finally:
-                self.queue.task_done()
-
-    def submit_write_json(self, filepath: str, data_str: str):
-        self.loop.call_soon_threadsafe(self.queue.put_nowait, ("write_json", (filepath, data_str)))
-
-    def submit_append_json(self, filepath: str, data_dict: dict):
-        self.loop.call_soon_threadsafe(self.queue.put_nowait, ("append_json", (filepath, data_dict)))
-
-# Globális singleton példány az aszinkron íróhoz
-async_writer = AsyncWriter()
+                time.sleep(0.5) # Adatbázis zárás vagy hiba esetén várakozás
 
 
 class StateManager:
@@ -81,6 +79,9 @@ class StateManager:
                 
         # Inicializáljuk az adatbázisokat (csak ha még nincsenek)
         self._init_db()
+        
+        # Elindítjuk az aszinkron worker szálat, ami a pending_writes-ot olvassa
+        self.async_writer = SQLiteAsyncWriter(self.db_path)
 
     def get_db_connection(self):
         """SQLite kapcsolat WAL móddal (konkurens olvasás/írás blokkolás nélkül)."""
@@ -159,6 +160,27 @@ class StateManager:
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            # --- 4. Queue Tábla (Async I/O-hoz) ---
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS pending_writes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_type TEXT,
+                    filepath TEXT,
+                    data TEXT
+                )
+            ''')
+            conn.commit()
+
+    def submit_write_json(self, filepath: str, data_str: str):
+        with self.get_db_connection() as conn:
+            conn.execute("INSERT INTO pending_writes (task_type, filepath, data) VALUES (?, ?, ?)", 
+                         ("write_json", filepath, data_str))
+            conn.commit()
+
+    def submit_append_json(self, filepath: str, data_dict: dict):
+        with self.get_db_connection() as conn:
+            conn.execute("INSERT INTO pending_writes (task_type, filepath, data) VALUES (?, ?, ?)", 
+                         ("append_json", filepath, json.dumps(data_dict, ensure_ascii=False)))
             conn.commit()
 
     # --- JSON Memory Pool Kezelés (Ágens specifikus) ---
@@ -172,9 +194,9 @@ class StateManager:
         base_dir.mkdir(parents=True, exist_ok=True)
         
         mem_file = base_dir / f"{agent_name}_memory.json"
-        # FileLock helyett az AsyncWriter-nek küldjük be a feladatot (Non-blocking)
+        # Memória írás beillesztése a perzisztens queue-ba
         data["timestamp"] = datetime.utcnow().isoformat()
-        async_writer.submit_append_json(str(mem_file), data)
+        self.submit_append_json(str(mem_file), data)
 
     # --- Cache Kezelő Metódusok ---
 
@@ -225,9 +247,9 @@ class StateManager:
     # --- State Checkpointing (Pydantic <-> JSON) ---
 
     def save_checkpoint(self, state: UPVSEngineState):
-        """Kimenti a teljes állapotgépet JSON fájlba a session_id alapján. AsyncQueue-t használ FileLock helyett."""
+        """Kimenti a teljes állapotgépet JSON fájlba a session_id alapján. SQLite-backed Queue-t használ."""
         file_path = os.path.join(self.checkpoint_dir, f"{state.session_id}.json")
-        async_writer.submit_write_json(file_path, state.model_dump_json(indent=2))
+        self.submit_write_json(file_path, state.model_dump_json(indent=2))
             
     def load_checkpoint(self, session_id: str) -> Optional[UPVSEngineState]:
         """Visszatölti az állapotgépet megszakadás esetén."""

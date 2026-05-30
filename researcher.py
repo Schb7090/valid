@@ -8,6 +8,7 @@ import json
 import uuid
 import yaml
 import hashlib
+import re
 from pathlib import Path
 from typing import List, Tuple
 
@@ -45,6 +46,33 @@ def load_config() -> dict:
     config_path = Path(__file__).parent / "config.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+# --- Normalizációs és Segédmetódusok ---
+
+def normalize_institution(inst: str) -> str:
+    """Intézménynevek tisztítása és gyakori rövidítéseinek feloldása."""
+    if not inst: return ""
+    inst = inst.lower()
+    inst = re.sub(r'[^a-z0-9\s]', '', inst) # Írásjelek eltávolítása (pl. M.I.T -> mit)
+    
+    # Gyakori intézmény mapping (bővíthető)
+    mappings = {
+        "mit": "massachusetts institute of technology",
+        "ucla": "university of california los angeles",
+        "stanford": "stanford university"
+    }
+    
+    inst = " ".join(inst.split())
+    return mappings.get(inst, inst)
+
+def normalize_author(author: str) -> str:
+    """Szerzőnevek tisztítása és titulusok eltávolítása."""
+    if not author: return ""
+    author = author.lower()
+    for title in ["dr", "prof", "phd", "md", "msc", "bsc"]:
+        author = re.sub(rf'\b{title}\b', '', author)
+    author = re.sub(r'[^a-z0-9\s]', '', author)
+    return " ".join(author.split())
 
 # --- SQLite Segédmetódusok ---
 
@@ -234,12 +262,14 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                 seen_author_ids = set()
                 
                 for src in valid_sources_for_claim:
-                    # Determinisztikus deduplikáció: ORCID, vagy MD5 hash a szerző(k)ből
+                    # Determinisztikus deduplikáció: ORCID, vagy SHA-256 hash a normalizált szerzőből és intézményből
                     if src.author_id:
                         auth_id = src.author_id
                     else:
-                        auth_string = src.authors if src.authors else f"unknown_{src.source_id}"
-                        auth_id = hashlib.md5(auth_string.encode('utf-8')).hexdigest()
+                        norm_auth = normalize_author(src.authors if src.authors else f"unknown_{src.source_id}")
+                        norm_inst = normalize_institution(src.institution if src.institution else "")
+                        combined_str = f"{norm_auth}|{norm_inst}"
+                        auth_id = hashlib.sha256(combined_str.encode('utf-8')).hexdigest()
                     
                     if auth_id not in seen_author_ids:
                         independent_sources.append(src)
