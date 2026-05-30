@@ -235,6 +235,8 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             authors=raw_src.get("authors", "Ismeretlen Szerző"),
                             author_id=raw_src.get("author_id"),
                             institution=raw_src.get("institution", "Ismeretlen Intézmény"),
+                            email_domain=raw_src.get("email_domain"),
+                            year=raw_src.get("year"),
                             source_type=raw_src["source_type"],
                             quality=quality
                         )
@@ -250,6 +252,8 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             title=f"Mock Source {len(valid_sources_for_claim)+1}", 
                             authors=raw_src.get("authors", f"Szerző_{len(valid_sources_for_claim)}"),
                             institution=raw_src.get("institution", f"Intézmény_{len(valid_sources_for_claim)}"),
+                            email_domain=raw_src.get("email_domain"),
+                            year=raw_src.get("year"),
                             source_type="journal", 
                             quality=85
                         )
@@ -268,7 +272,10 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                     else:
                         norm_auth = normalize_author(src.authors if src.authors else f"unknown_{src.source_id}")
                         norm_inst = normalize_institution(src.institution if src.institution else "")
-                        combined_str = f"{norm_auth}|{norm_inst}"
+                        email_dom = src.email_domain.lower() if src.email_domain else "unknown"
+                        year_bracket = f"{(src.year // 5) * 5}-{(src.year // 5) * 5 + 4}" if src.year else "unknown"
+                        
+                        combined_str = f"{norm_inst}|{norm_auth}|{email_dom}|{year_bracket}"
                         auth_id = hashlib.sha256(combined_str.encode('utf-8')).hexdigest()
                     
                     if auth_id not in seen_author_ids:

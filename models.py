@@ -89,6 +89,7 @@ class SourceRecord(BaseModel):
     authors: Optional[str] = None
     author_id: Optional[str] = None
     institution: Optional[str] = None
+    email_domain: Optional[str] = None
     year: Optional[int] = None
     doi: Optional[str] = None
     url: Optional[str] = None
