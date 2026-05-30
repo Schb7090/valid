@@ -3,6 +3,7 @@ import json
 import hashlib
 import os
 import time
+import queue
 from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
@@ -17,21 +18,32 @@ class SQLiteAsyncWriter:
     Háttérszálon futó, SQLite tábla alapú író mechanizmus.
     Perzisztensen tárolja a feldolgozásra váró lemezműveleteket, így
     crash-safe, de a főszálat nem blokkolja.
+    V11: Zero-CPU event-driven működés queue.Queue használatával.
     """
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.running = True
+        self.work_queue = queue.Queue()
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
+    def wake_up(self):
+        """Eseményvezérelt jelzés a háttérszálnak, hogy van új feladat."""
+        self.work_queue.put(1)
+
     def _worker(self):
+        # Kezdeti felébresztés, hátha maradtak feldolgozatlan adatok egy korábbi crash után
+        self.wake_up()
+        
         while self.running:
             try:
+                processed_any = False
                 with sqlite3.connect(self.db_path, timeout=15.0) as conn:
                     cursor = conn.cursor()
                     cursor.execute("SELECT id, task_type, filepath, data FROM pending_writes ORDER BY id ASC LIMIT 1")
                     row = cursor.fetchone()
                     if row:
+                        processed_any = True
                         row_id, task, filepath, data = row
                         try:
                             if task == "write_json":
@@ -54,8 +66,11 @@ class SQLiteAsyncWriter:
                             # Hibás rekord eldobása, hogy ne akassza meg végleg a sort
                             cursor.execute("DELETE FROM pending_writes WHERE id = ?", (row_id,))
                             conn.commit()
-                    else:
-                        time.sleep(0.1) # Polling várakozás, ha üres a sor
+                            
+                # Ha nem találtunk semmit az adatbázisban, blokkolva várjuk a következő ébresztést (Zero CPU Idle)
+                if not processed_any:
+                    self.work_queue.get(block=True, timeout=None)
+                    
             except Exception as e:
                 time.sleep(0.5) # Adatbázis zárás vagy hiba esetén várakozás
 
@@ -176,12 +191,14 @@ class StateManager:
             conn.execute("INSERT INTO pending_writes (task_type, filepath, data) VALUES (?, ?, ?)", 
                          ("write_json", filepath, data_str))
             conn.commit()
+        self.async_writer.wake_up()
 
     def submit_append_json(self, filepath: str, data_dict: dict):
         with self.get_db_connection() as conn:
             conn.execute("INSERT INTO pending_writes (task_type, filepath, data) VALUES (?, ?, ?)", 
                          ("append_json", filepath, json.dumps(data_dict, ensure_ascii=False)))
             conn.commit()
+        self.async_writer.wake_up()
 
     # --- JSON Memory Pool Kezelés (Ágens specifikus) ---
 

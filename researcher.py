@@ -9,6 +9,7 @@ import uuid
 import yaml
 import hashlib
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
@@ -127,6 +128,9 @@ def mock_fetch_from_apis(query: str, depth: str, config: dict) -> List[dict]:
             "author_id": "0000-0002-1825-0097", # ORCID Mock
             "institution": "Harvard",
             "source_type": "journal",
+            "year": 2024,
+            "impact_factor": 8.5,
+            "citation_count": 120,
             "context": f"Ez egy szintetizált mock tartalom, ami bizonyítja ezt a keresést: {query}"
         },
         {
@@ -136,6 +140,9 @@ def mock_fetch_from_apis(query: str, depth: str, config: dict) -> List[dict]:
             "author_id": "0000-0001-2345-6789", # ORCID Mock
             "institution": "MIT",
             "source_type": "journal",
+            "year": 2022,
+            "impact_factor": 3.2,
+            "citation_count": 45,
             "context": f"Második független forrás a kereséshez: {query}"
         }
     ]
@@ -237,6 +244,8 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             institution=raw_src.get("institution", "Ismeretlen Intézmény"),
                             email_domain=raw_src.get("email_domain"),
                             year=raw_src.get("year"),
+                            impact_factor=raw_src.get("impact_factor", 0.0),
+                            citation_count=raw_src.get("citation_count", 0),
                             source_type=raw_src["source_type"],
                             quality=quality
                         )
@@ -253,7 +262,9 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                             authors=raw_src.get("authors", f"Szerző_{len(valid_sources_for_claim)}"),
                             institution=raw_src.get("institution", f"Intézmény_{len(valid_sources_for_claim)}"),
                             email_domain=raw_src.get("email_domain"),
-                            year=raw_src.get("year"),
+                            year=raw_src.get("year", 2023),
+                            impact_factor=5.0,
+                            citation_count=10,
                             source_type="journal", 
                             quality=85
                         )
@@ -325,16 +336,34 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                         seen_author_ids.add(auth_id)
                         seen_author_details.append({"auth": norm_auth, "inst": norm_inst, "year": src.year, "hash": auth_id})
                 
-                # A confidence score-alapú (0.0 - 1.0)
+                # V11: Weighted Multi-Factor Confidence Scorer
+                current_year = datetime.utcnow().year
+                avg_authority = 0.0
+                avg_recency = 0.0
+                
                 num_indep = len(independent_sources)
-                if num_indep >= 3:
-                    confidence = 1.0
-                elif num_indep == 2:
-                    confidence = 0.7
-                elif num_indep == 1:
-                    confidence = 0.3
-                else:
-                    confidence = 0.0
+                if num_indep > 0:
+                    for s in independent_sources:
+                        # Authority 0.0 - 1.0 (Quality: 60%, IF: 20%, Citations: 20%)
+                        auth = (s.quality / 100.0) * 0.6 + min(s.impact_factor / 10.0, 1.0) * 0.2 + min(s.citation_count / 100.0, 1.0) * 0.2
+                        avg_authority += auth
+                        
+                        # Recency 0.0 - 1.0 (5% bomlás évenként)
+                        if s.year:
+                            rec = max(0.0, 1.0 - (current_year - s.year) * 0.05)
+                        else:
+                            rec = 0.5 # Ismeretlen évszám = közepes büntetés
+                        avg_recency += rec
+                        
+                    avg_authority /= num_indep
+                    avg_recency /= num_indep
+                
+                # Consensus 0.0 - 1.0 (3 független forrás = 1.0, 1 forrás = 0.33)
+                consensus = min(num_indep / 3.0, 1.0)
+                
+                # Végső súlyozott pontszám
+                # Authority 40%, Recency 30%, Consensus 30%
+                confidence = (avg_authority * 0.4) + (avg_recency * 0.3) + (consensus * 0.3)
                 
                 fact = FactRecord(
                     fact_id=f"fact_{uuid.uuid4().hex[:8]}",

@@ -95,6 +95,8 @@ class SourceRecord(BaseModel):
     url: Optional[str] = None
     source_type: Literal["journal", "preprint", "book", "web", "other"]
     quality: int = Field(ge=1, le=100, default=50)
+    impact_factor: float = 0.0
+    citation_count: int = 0
 
 class FactRecord(BaseModel):
     fact_id: str
