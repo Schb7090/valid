@@ -15,19 +15,9 @@ from planner import plan_dag
 from dag_reviewer import review_dag
 from researcher import execute_research
 from generator import generate_drafts_for_node, get_facts_for_node
-from council import council_session
+from validator import validation_session
 from logic_auditor import execute_logic_audit
 from assembler import assemble_document
-
-# ==========================================
-# LLM MOCK / ABSTRACTION LAYER
-# ==========================================
-def call_llm(prompt: str, temperature: float = 0.5) -> str:
-    """
-    Ezt a metódust kell később lecserélni a tényleges (pl. Gemini API) hívásra.
-    Mivel a jelen fázis csak az architektúra építése, ez egy Mock.
-    """
-    raise NotImplementedError("API hívás nem megvalósított.")
 
 class TokenLimitExceededError(Exception):
     pass
@@ -189,8 +179,8 @@ class UPVSEngine:
                             # 4.1 Generálás (Dinamikus ágakkal)
                             drafts = generate_drafts_for_node(node, state.task_context, self.state_manager, session_id, feedback, branches=branches)
                             
-                            # 4.2 Tanács szavazás (Dinamikus personákkal)
-                            best_valid, best_vetoed, combined_feedback = council_session(node, drafts, state.task_context, self.state_manager, session_id, active_personas=active_personas)
+                            # 4.2 Validáció szavazás (1 erős modell + V1 Grounding)
+                            best_valid, best_vetoed, combined_feedback = validation_session(node, drafts, state.task_context, self.state_manager, session_id)
                             
                             if best_valid:
                                 state.final_sections[node.id] = best_valid.draft_text

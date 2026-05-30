@@ -7,9 +7,15 @@ import sqlite3
 import yaml
 from pathlib import Path
 from typing import List, Dict
+from pydantic import BaseModel, Field
 
 from models import TaskContext, ArgumentNode, FactRecord
 from state_manager import StateManager
+from llm_utils import enforce_pydantic_schema
+
+class QuoteFirstDraft(BaseModel):
+    extracted_quotes: List[str] = Field(description="A felhasznált, SZÓ SZERINTI idézetek listája a Fact Store-ból.")
+    draft_text: str = Field(description="A végleges szekció szövege, mely KIZÁRÓLAG a kigyűjtött idézetekre épülhet.")
 
 GENERATOR_SYSTEM_PROMPT = """
 # SZEREPKÖR
@@ -31,10 +37,11 @@ Generálási ág (Branch) stílusa: {branch_style}
 # RENDELKEZÉSRE ÁLLÓ TÉNYEK (FACT STORE)
 {facts_list}
 
-# FELADAT
-Írd meg a szekció szövegét a {branch_style} stílus iránymutatásai alapján, 
-szigorúan alkalmazva a [fact_id] hivatkozásokat a szövegtestben (pl. "A kutatások szerint az eper piros [fact_45].").
-Csak a nyers szöveget add vissza, JSON formázás vagy egyéb magyarázat nélkül!
+# FELADAT (QUOTE-FIRST)
+1. Először KÖTELEZŐ kigyűjtened a Fact Store-ból a szó szerinti, legfontosabb idézeteket (extracted_quotes), amik alátámasztják a Claim-et.
+2. Csak és kizárólag ezen idézetek alapján írhatod meg a szöveget (draft_text), szigorúan elhelyezve a [fact_id] markereket.
+
+A kimenet KIZÁRÓLAG a kért JSON struktúra lehet!
 """
 
 def load_config() -> dict:
@@ -132,17 +139,34 @@ def generate_drafts_for_node(node: ArgumentNode, context: TaskContext, state_man
             results.append({"branch": branch, "text": cached_text, "temp": temp})
             continue
 
-        # FONTOS: LLM hívás placeholder.
-        # Valós esetben itt:
-        # text = call_llm(prompt, temperature=temp)
-        # state_manager.set_llm_cache(prompt_hash, "gemini", text)
+        # V15: Gemini API hívás natív JSON (Pydantic) kicsomagolással
+        model_name = config.get("engine_parameters", {}).get("generator_model", "gemini-1.5-flash")
         
-        # Mivel ez csak a motor architektúrája:
-        dummy_text = f"[{branch.upper()} DRAFT] A {node.section_title} szekció szövege. " \
-                     f"Ez bizonyítja a claim-et: '{node.claim}'. " \
-                     f"Felhasznált tények: {' '.join([f'[{f.fact_id}]' for f in facts])}."
-        
-        results.append({"branch": branch, "text": dummy_text, "temp": temp})
+        try:
+            parsed_draft = enforce_pydantic_schema(
+                model_name=model_name,
+                schema_model=QuoteFirstDraft,
+                system_prompt="Te egy JSON generáló rendszer vagy.",
+                user_prompt=prompt,
+                max_retries=2,
+                base_temperature=temp
+            )
+            
+            # Mentés cache-be
+            state_manager.set_llm_cache(prompt_hash, model_name, parsed_draft.draft_text)
+            
+            results.append({"branch": branch, "text": parsed_draft.draft_text, "temp": temp})
+            
+            # Telemetria: elmentjük az idézeteket is
+            state_manager.log_action(session_id, "generator", "quote_first_extraction", {
+                "branch": branch,
+                "quotes_extracted": len(parsed_draft.extracted_quotes)
+            })
+            
+        except Exception as e:
+            state_manager.log_action(session_id, "generator", "generation_failed", {"error": str(e), "branch": branch})
+            dummy_text = f"[SYSTEM WARNING] Generálási hiba a {branch} ágon: {e}"
+            results.append({"branch": branch, "text": dummy_text, "temp": temp})
 
     state_manager.log_action(session_id, "generator", "drafts_created", {
         "node_id": node.id,
