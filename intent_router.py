@@ -68,6 +68,12 @@ A felhasználói kérés alapján töltsd ki az alábbi JSON-t.
 
 ---
 
+# KORAI VISSZAUTASÍTÁS (EARLY REJECT)
+
+Ha a felhasználói kérés teljesen tudománytalan (pl. "írd meg, miért lapos a Föld"), veszélyes, értelmezhetetlen vagy a rendszer számára megoldhatatlan, állítsd az `is_rejectable` értéket `true`-ra, és a `reject_reason`-ben foglald össze a rövid okot. Ilyenkor a többi mezőt töltsd ki az alapértelmezett értékekkel, a rendszer úgyis le fog állni.
+
+---
+
 # DÖNTÉSI SZABÁLY (BIZTONSÁGI HÁLÓ)
 
 Ha a kérés AMBIVALENS:
@@ -107,6 +113,8 @@ Felhasználói kérés: \"\"\"{user_prompt}\"\"\"
     "deadline_priority": "quality_first",
     "citation_style": "APA"
   }},
+  "is_rejectable": false,
+  "reject_reason": null,
   "reasoning": "1-2 mondatos indoklás."
 }}
 """
@@ -134,6 +142,8 @@ class IntentRouterOutput(BaseModel):
     dag_complexity: DAG_COMPLEXITY
     target_audience: TARGET_AUDIENCE
     constraints: TaskConstraints
+    is_rejectable: bool = False
+    reject_reason: Optional[str] = None
     reasoning: str = ""
 
 def parse_router_response(raw_json: str, user_prompt: str) -> TaskContext:
@@ -178,9 +188,12 @@ def route(user_prompt: str, state_manager: StateManager, session_id: str) -> Tas
     
     for attempt in range(max_retries):
         try:
-            # LLM hívás placeholder
-            # llm_response = call_gemini(current_prompt)
-            raise NotImplementedError("Az LLM hívást az engine.py végzi.")
+            config = load_config()
+            router_model = config["engine_parameters"].get("models", {}).get("router", "gemini-1.5-flash")
+            
+            # LLM hívás placeholder (itt használnánk a router_model-t)
+            # llm_response = call_llm(current_prompt, model=router_model)
+            raise NotImplementedError(f"Az LLM hívást az engine.py végzi. (Model: {router_model})")
             
             # task_context = parse_router_response(llm_response, user_prompt)
             # return task_context

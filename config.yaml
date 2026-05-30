@@ -1,4 +1,15 @@
 engine_parameters:
+  # 0. System Limits & Routing
+  limits:
+    max_session_tokens: 50000
+  models:
+    router: "gemini-1.5-flash"
+    planner: "gemini-1.5-flash"
+    reviewer: "gemini-1.5-flash"
+    researcher: "gemini-1.5-flash"
+    generator: "gemini-1.5-pro"
+    council: "gemini-1.5-pro"
+
   # 1. Intent Router
   few_shot_limit: 3
 

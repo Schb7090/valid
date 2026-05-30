@@ -16,7 +16,7 @@ from generator import get_facts_for_node
 COUNCIL_SYSTEM_PROMPT = """
 # SZEREPKÖR
 Te a UPVS-Engine "Bölcsek Tanácsának" egy specifikus tagja vagy: {agent_role}.
-A feladatod egy nyers szekció-draft szigorú értékelése.
+A feladatod a generált szekció-változatok (draftok) szigorú értékelése.
 
 # AZ ÁGENS FELADATA: {agent_description}
 
@@ -24,17 +24,27 @@ A feladatod egy nyers szekció-draft szigorú értékelése.
 Feladat/Téma: {task_title}
 Csomópont állítása (Claim): {claim}
 
-Értékelendő Draft szövege:
-\"\"\"{draft_text}\"\"\"
+{drafts_text}
 
 # FACT STORE TÉNYEK (Grounding Verifier számára kritikus):
 {facts_list}
 
-# KIMENETI FORMÁTUM (KIZÁRÓLAG JSON)
+# KIMENETI FORMÁTUM (KIZÁRÓLAG ÉRVÉNYES JSON)
 {{
-  "score": 85,  // Értékelés 1-100 között a te szakterületed alapján
-  "reasoning": "Részletes indoklás, miért adtad ezt a pontszámot. Milyen hibákat találtál?",
-  "veto_raised": false  // true, ha a hiba annyira súlyos, hogy teljesen elutasítod a szöveget
+  "evaluations": [
+    {{
+      "draft_index": 0,
+      "score": 85,
+      "reasoning": "Részletes indoklás, miért adtad ezt a pontszámot a 0. drafthoz. Milyen hibákat találtál?",
+      "veto_raised": false
+    }},
+    {{
+      "draft_index": 1,
+      "score": 40,
+      "reasoning": "...",
+      "veto_raised": true
+    }}
+  ]
 }}
 """
 
@@ -76,46 +86,42 @@ def verify_grounding_deterministic(draft_text: str, facts: List[FactRecord], gro
         
     return 100, False, "A [fact_id] hivatkozások formai és mennyiségi szintje megfelelő."
 
-def evaluate_draft(draft: Dict[str, str], node: ArgumentNode, context: TaskContext, state_manager: StateManager, session_id: str) -> DelphiDraftResult:
-    """A 4 ágens kiértékel egyetlen draftot."""
-    import yaml
-    from pathlib import Path
-    
+def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, context: TaskContext, state_manager: StateManager, session_id: str) -> List[DelphiDraftResult]:
+    """A 4 ágens kiértékeli az összes draftot egyetlen (vagy 4) hívással draftonkénti 4 hívás helyett."""
     config_path = Path(__file__).parent / "config.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
         
     temperatures = config["engine_parameters"]["agent_council"].get("temperatures", {})
     profiles = get_agent_profiles()
-    evaluations = []
-    total_score = 0
-    is_vetoed = False
     
     facts = get_facts_for_node(state_manager.db_path, node.id)
     facts_str = "\n".join([f"[{f.fact_id}]: {f.claim_text}" for f in facts])
     
+    drafts_text = ""
+    for i, d in enumerate(drafts):
+        drafts_text += f"\n--- DRAFT {i} ({d['branch']}) ---\n{d['text']}\n"
+        
+    draft_evals = [[] for _ in drafts]
+    
     for agent_name, agent_desc in profiles.items():
-        # 1. Determinisztikus Grounding Verifier override
         if agent_name == "Grounding Verifier":
             required_ratio = 0.9 if context.grounding_level == "strict" else 0.6
-            score, veto, reason = verify_grounding_deterministic(draft["text"], facts, context.grounding_level, required_ratio)
-            # Ha a kód vétóz, be sem hívjuk az LLM-et
-            if veto:
-                evaluations.append(SectionEvaluation(agent_name=agent_name, scores={"grounding": score}, reasoning=reason, veto_raised=True))
-                is_vetoed = True
-                continue
-
-        # 2. LLM Értékelés
+            for i, draft in enumerate(drafts):
+                score, veto, reason = verify_grounding_deterministic(draft["text"], facts, context.grounding_level, required_ratio)
+                draft_evals[i].append(SectionEvaluation(agent_name=agent_name, scores={"grounding": score}, reasoning=reason, veto_raised=veto))
+            continue
+            
         prompt = COUNCIL_SYSTEM_PROMPT.format(
             agent_role=agent_name,
             agent_description=agent_desc,
             task_title=node.section_title,
             claim=node.claim,
-            draft_text=draft["text"],
+            drafts_text=drafts_text,
             facts_list=facts_str
         )
         
-        prompt_hash = state_manager.generate_hash(prompt, f"council_{agent_name}")
+        prompt_hash = state_manager.generate_hash(prompt, f"council_batched_{agent_name}")
         cached = state_manager.get_llm_cache(prompt_hash)
         
         try:
@@ -123,69 +129,68 @@ def evaluate_draft(draft: Dict[str, str], node: ArgumentNode, context: TaskConte
                 data = json.loads(cached)
             else:
                 # LLM MOCK
-                data = {"score": 85, "reasoning": "Mocked LLM evaluation pass.", "veto_raised": False}
+                data = {"evaluations": [{"draft_index": i, "score": 85, "reasoning": "Mocked LLM batched evaluation pass.", "veto_raised": False} for i in range(len(drafts))]}
                 
-            score = data.get("score", 0)
-            veto = data.get("veto_raised", False)
-            
-            # Dinamikus vétó küszöbök ellenőrzése a Router (TaskContext) alapján
-            thresholds = context.council_thresholds
-            if agent_name == "Domain Expert" and score < thresholds.domain_expert_veto:
-                veto = True
-            elif agent_name == "De-biaser" and score < thresholds.debiaser_veto:
-                veto = True
+            for eval_data in data.get("evaluations", []):
+                i = eval_data.get("draft_index", 0)
+                if i >= len(drafts): continue
                 
-            evaluations.append(SectionEvaluation(
-                agent_name=agent_name,
-                scores={"overall": score},
-                reasoning=data.get("reasoning", ""),
-                veto_raised=veto
-            ))
-            
-            # --- JSON MEMORY POOL LOGGING ---
-            agent_temp = temperatures.get(agent_name, 0.0)
-            state_manager.log_agent_memory(
-                session_id=session_id,
-                agent_name=agent_name.lower().replace(" ", "_"),
-                data={
-                    "node_id": node.id,
-                    "claim": node.claim,
-                    "draft_branch": draft["branch"],
-                    "score": score,
-                    "veto": veto,
-                    "reasoning": data.get("reasoning", ""),
-                    "temperature": agent_temp
-                }
-            )
-            # -------------------------------
-            
-            total_score += score
-            if veto:
-                is_vetoed = True
+                score = eval_data.get("score", 0)
+                veto = eval_data.get("veto_raised", False)
                 
+                thresholds = context.council_thresholds
+                if agent_name == "Domain Expert" and score < thresholds.domain_expert_veto:
+                    veto = True
+                elif agent_name == "De-biaser" and score < thresholds.debiaser_veto:
+                    veto = True
+                    
+                draft_evals[i].append(SectionEvaluation(
+                    agent_name=agent_name,
+                    scores={"overall": score},
+                    reasoning=eval_data.get("reasoning", ""),
+                    veto_raised=veto
+                ))
+                
+                agent_temp = temperatures.get(agent_name, 0.0)
+                state_manager.log_agent_memory(
+                    session_id=session_id,
+                    agent_name=agent_name.lower().replace(" ", "_"),
+                    data={
+                        "node_id": node.id,
+                        "draft_index": i,
+                        "score": score,
+                        "veto": veto,
+                        "reasoning": eval_data.get("reasoning", ""),
+                        "temperature": agent_temp
+                    }
+                )
         except Exception as e:
-            evaluations.append(SectionEvaluation(agent_name=agent_name, scores={"overall": 0}, reasoning=f"Parse Error: {e}", veto_raised=True))
-            is_vetoed = True
-
-    avg_score = total_score / len(profiles) if profiles else 0
-    return DelphiDraftResult(
-        draft_id=state_manager.generate_hash(draft["text"]),
-        draft_text=draft["text"],
-        branch_type=draft["branch"],
-        evaluations=evaluations,
-        average_score=avg_score,
-        is_vetoed=is_vetoed
-    )
+            for i in range(len(drafts)):
+                draft_evals[i].append(SectionEvaluation(agent_name=agent_name, scores={"overall": 0}, reasoning=f"Parse Error: {e}", veto_raised=True))
+                
+    results = []
+    for i, draft in enumerate(drafts):
+        total_score = sum(ev.scores.get("overall", ev.scores.get("grounding", 0)) for ev in draft_evals[i])
+        avg_score = total_score / len(profiles) if profiles else 0
+        is_vetoed = any(ev.veto_raised for ev in draft_evals[i])
+        
+        results.append(DelphiDraftResult(
+            draft_id=state_manager.generate_hash(draft["text"]),
+            draft_text=draft["text"],
+            branch_type=draft["branch"],
+            evaluations=draft_evals[i],
+            average_score=avg_score,
+            is_vetoed=is_vetoed
+        ))
+        
+    return results
 
 def council_session(node: ArgumentNode, drafts: List[Dict[str, str]], context: TaskContext, state_manager: StateManager, session_id: str) -> Tuple[Optional[DelphiDraftResult], Optional[DelphiDraftResult], str]:
     """
-    Lefuttatja a tanácsot a node-hoz tartozó draftokon. 
+    Lefuttatja a tanácsot a node-hoz tartozó draftokon kötegelve. 
     Visszaadja: (best_valid_draft, best_vetoed_draft, combined_feedback)
     """
-    results = []
-    for draft in drafts:
-        res = evaluate_draft(draft, node, context, state_manager, session_id)
-        results.append(res)
+    results = evaluate_drafts_batched(drafts, node, context, state_manager, session_id)
         
     state_manager.log_action(session_id, "council", "evaluations_completed", {"node_id": node.id, "draft_results": [{"branch": r.branch_type, "score": r.average_score, "veto": r.is_vetoed} for r in results]})
 

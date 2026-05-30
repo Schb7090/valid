@@ -8,7 +8,7 @@ import yaml
 from pathlib import Path
 from typing import Optional
 
-from models import UPVSEngineState
+from models import UPVSEngineState, TokenUsage
 from state_manager import StateManager
 from intent_router import route
 from planner import plan_dag
@@ -28,6 +28,9 @@ def call_llm(prompt: str, temperature: float = 0.5) -> str:
     Mivel a jelen fázis csak az architektúra építése, ez egy Mock.
     """
     raise NotImplementedError("API hívás nem megvalósított.")
+
+class TokenLimitExceededError(Exception):
+    pass
 
 # ==========================================
 # FŐ MOTOR
@@ -55,6 +58,16 @@ class UPVSEngine:
             # Ha valaki épp menti a YAML-t és hibás szintaxisú, hagyjuk figyelmen kívül
             pass
 
+    def check_token_limit(self, state: UPVSEngineState):
+        """Költségsapka (Kill-Switch): Ha a token limitet átléptük, megszakítjuk a folyamatot."""
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+            
+        max_tokens = config.get("engine_parameters", {}).get("limits", {}).get("max_session_tokens", 50000)
+        
+        if state.token_usage.total_tokens > max_tokens:
+            raise TokenLimitExceededError(f"A Token Limit ({max_tokens}) kimerült! Jelenlegi: {state.token_usage.total_tokens}")
+
     def run(self, user_prompt: str, session_id: Optional[str] = None) -> str:
         """A rendszer belépési pontja. Teljesen autonóm módon (HITL nélkül) fut le."""
         session_id = session_id or uuid.uuid4().hex
@@ -71,6 +84,13 @@ class UPVSEngine:
                 state.status = "routing"
                 state.task_context = route(user_prompt, self.state_manager, session_id)
                 self.state_manager.save_checkpoint(state)
+                
+                # Early Reject (Költségvédelem)
+                if state.task_context.is_rejectable:
+                    state.status = "rejected"
+                    self.state_manager.log_action(session_id, "engine", "early_reject", {"reason": state.task_context.reject_reason})
+                    self.state_manager.save_checkpoint(state)
+                    return f"A kérés visszautasítva: {state.task_context.reject_reason}"
 
             # 2. FÁZIS: PLANNER ÉS DAG REVIEWER
             if state.status == "routing":
@@ -117,6 +137,7 @@ class UPVSEngine:
                         
                     # Minden csomópont előtt frissítjük a konfigurációt!
                     self._reload_config(state)
+                    self.check_token_limit(state)
                     
                     # 4.0 Council Bypass Logika (Score-alapú)
                     facts = get_facts_for_node(self.state_manager.db_path, node.id)

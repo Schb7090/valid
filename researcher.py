@@ -109,16 +109,44 @@ def mock_fetch_from_apis(query: str, depth: str, config: dict) -> List[dict]:
         }
     ]
 
+def truncate_context(context_text: str, query: str, max_words: int = 500) -> str:
+    """
+    Költségcsökkentő csonkolás (Chunking): 
+    Ha a nyers forrás hatalmas, megkeresi a query-hez legjobban illeszkedő 
+    ablakot, és csak azt az 500 szót adja vissza az LLM-nek.
+    """
+    words = context_text.split()
+    if len(words) <= max_words:
+        return context_text
+        
+    query_terms = [t.lower() for t in query.split() if len(t) > 3]
+    best_idx = 0
+    max_matches = 0
+    
+    # Egyszerű csúszóablak alapú keresés a legsűrűbb részre
+    window_size = max_words
+    for i in range(len(words) - window_size + 1):
+        window_text = " ".join(words[i:i+window_size]).lower()
+        matches = sum(1 for term in query_terms if term in window_text)
+        if matches > max_matches:
+            max_matches = matches
+            best_idx = i
+            
+    return " ".join(words[best_idx : best_idx + window_size])
+
 def evaluate_source_with_llm(claim: str, raw_source: dict, config: dict, state_manager: StateManager) -> Tuple[bool, int, str]:
     """Felépíti a promptot és értékeli a forrást az LLM segítségével."""
     threshold = config["engine_parameters"]["research"]["quality_threshold"]
+    
+    # Védjük a Context Window-t a csonkolóval
+    truncated_context = truncate_context(raw_source["context"], claim)
     
     prompt = RESEARCHER_SYSTEM_PROMPT.format(
         claim=claim,
         quality_threshold=threshold,
         source_title=raw_source["title"],
         source_type=raw_source["source_type"],
-        source_context=raw_source["context"]
+        source_context=truncated_context
     )
     
     prompt_hash = state_manager.generate_hash(prompt, "researcher_eval")

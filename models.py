@@ -54,6 +54,8 @@ class TaskContext(BaseModel):
     dag_complexity: DAG_COMPLEXITY = "medium"
     target_audience: TARGET_AUDIENCE = "professional"
     constraints: TaskConstraints = Field(default_factory=TaskConstraints)
+    is_rejectable: bool = False
+    reject_reason: Optional[str] = None
     rubric: Optional[EvaluationRubric] = None
     few_shot_examples: List[str] = Field(default_factory=list, max_length=3)
     reasoning: str = ""
@@ -132,7 +134,19 @@ class DelphiDraftResult(BaseModel):
     average_score: float
     is_vetoed: bool
 
-# --- 5. STATE MANAGEMENT ---
+# --- 5. TOKEN TRACKING & COSTS ---
+
+class TokenUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    
+    def add(self, prompt: int, completion: int):
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_tokens += (prompt + completion)
+
+# --- 6. STATE MANAGEMENT ---
 
 class UPVSEngineState(BaseModel):
     session_id: str
@@ -150,3 +164,4 @@ class UPVSEngineState(BaseModel):
     final_sections: Dict[str, str] = Field(default_factory=dict)
 
     audit_trail: List[Dict[str, Any]] = Field(default_factory=list)
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
