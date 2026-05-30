@@ -162,11 +162,13 @@ def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, co
                 score = eval_data.get("score", 0)
                 veto = eval_data.get("veto_raised", False)
                 
-                thresholds = context.council_thresholds
-                if agent_name == "Domain Expert" and score < thresholds.domain_expert_veto:
-                    veto = True
-                elif agent_name == "De-biaser" and score < thresholds.debiaser_veto:
-                    veto = True
+                # V14: Szétválasztott sávok (V1, V2: Blokkoló, V3: Tanácsadó)
+                if agent_name in ["Grounding Verifier", "Logical Arc Auditor"]:
+                    # Meghagyjuk az LLM által adott veto-t (vagy determinisztikust)
+                    pass
+                else:
+                    # Domain Expert és De-biaser (V3) mostantól TANÁCSADÓK, nem vétózhatnak blokkolóan
+                    veto = False
                     
                 draft_evals[i].append(SectionEvaluation(
                     agent_name=agent_name,
@@ -202,9 +204,12 @@ def evaluate_drafts_batched(drafts: List[Dict[str, str]], node: ArgumentNode, co
                 
     results = []
     for i, draft in enumerate(drafts):
-        total_score = sum(ev.scores.get("overall", ev.scores.get("grounding", 0)) for ev in draft_evals[i])
-        avg_score = total_score / len(profiles) if profiles else 0
-        is_vetoed = any(ev.veto_raised for ev in draft_evals[i])
+        # V14: Csak a V3 (Tanácsadó) adja az átlag pontszámot a kiválasztáshoz
+        v3_scores = [ev.scores.get("overall", 0) for ev in draft_evals[i] if ev.agent_name not in ["Grounding Verifier", "Logical Arc Auditor"]]
+        avg_score = sum(v3_scores) / len(v3_scores) if v3_scores else 100.0
+        
+        # V14: Csak a V1 és V2 (Blokkoló) vétózhatja meg a draftot
+        is_vetoed = any(ev.veto_raised for ev in draft_evals[i] if ev.agent_name in ["Grounding Verifier", "Logical Arc Auditor"])
         
         results.append(DelphiDraftResult(
             draft_id=state_manager.generate_hash(draft["text"]),
@@ -237,8 +242,10 @@ def council_session(node: ArgumentNode, drafts: List[Dict[str, str]], context: T
     if not best_valid and best_vetoed:
         feedbacks = []
         for ev in best_vetoed.evaluations:
-            if ev.veto_raised:
-                feedbacks.append(f"- {ev.agent_name}: {ev.thought_process} -> {ev.conclusion}")
+            if ev.veto_raised and ev.agent_name in ["Grounding Verifier", "Logical Arc Auditor"]:
+                feedbacks.append(f"- {ev.agent_name} (BLOKKOLÓ HIBA): {ev.thought_process} -> {ev.conclusion}")
+            elif ev.agent_name not in ["Grounding Verifier", "Logical Arc Auditor"]:
+                feedbacks.append(f"- {ev.agent_name} (Tanács): {ev.conclusion}")
         combined_feedback = "\n".join(feedbacks)
         
     return best_valid, best_vetoed, combined_feedback

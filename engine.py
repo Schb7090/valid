@@ -152,24 +152,32 @@ class UPVSEngine:
                         
                     system_warning = config_dict.get("fallback_action", {}).get("system_warning_tag", "[SYSTEM WARNING: Válasz nem konzisztens.]")
                     
-                    # 3-Tier Routing Logika
+                    # G0: KUTATÁSI KAPU (Research Gate)
+                    MIN_RESEARCH_CONFIDENCE = 0.40
+                    if node_confidence < MIN_RESEARCH_CONFIDENCE:
+                        # G0F: Bukóág -> UNSUPPORTED
+                        state.final_sections[node.id] = "[UNSUPPORTED] Nincs elegendő megbízható forrás az állítás bizonyítására."
+                        state.completed_nodes.append(node.id)
+                        self.state_manager.log_action(session_id, "engine", "g0_research_gate_failed", {"node_id": node.id, "confidence": node_confidence})
+                        continue # Ugrás a következő csomópontra (LOOP)
+                    
+                    # 3-Tier Routing Logika (K generálás meghatározása)
                     if node_confidence >= 0.85:
                         path_name = "super"
-                        branches = ["prioritized"]
+                        branches = ["prioritized"] # k = 1
                         max_retries = 0
-                        active_personas = ["Grounding Verifier"] # Szigorított Bypass: csak a Grounding fut le
                     elif node_confidence >= 0.70:
                         path_name = "moderate"
-                        branches = ["conservative"]
-                        max_retries = 0
-                        active_personas = ["Domain Expert"] # Csak 1 persona
+                        branches = ["conservative", "prioritized"] # k = 2
+                        max_retries = 1
                     else:
                         path_name = "weak"
-                        branches = ["conservative", "critical", "synthetic"]
+                        branches = ["conservative", "critical", "synthetic"] # k = 3
                         max_retries = config_dict.get("fallback_action", {}).get("council_max_retries", 3)
-                        active_personas = None # Mind a 4 persona
                         
-                    self.state_manager.log_action(session_id, "engine", "routing_decision", {"node_id": node.id, "confidence": node_confidence, "path": path_name})
+                    active_personas = None # V14: A Validáció-sáv MINDIG fut (minden persona minden draftra)
+                        
+                    self.state_manager.log_action(session_id, "engine", "g0_passed_routing", {"node_id": node.id, "confidence": node_confidence, "path": path_name, "k_drafts": len(branches)})
                     
                     retries = 0
                     node_approved = False
@@ -197,15 +205,15 @@ class UPVSEngine:
                                     best_overall_vetoed = best_vetoed
 
                         if not node_approved:
-                            # Fallback Protokoll (Ha kimerült a max_retries)
+                            # G1D: Degradálás (UNVERIFIED) - Nincs túlélő a retry-ok után sem
                             if best_overall_vetoed:
-                                fallback_text = f"{system_warning}\n\n{best_overall_vetoed.draft_text}"
+                                fallback_text = f"[UNVERIFIED] {system_warning}\n\n{best_overall_vetoed.draft_text}"
                             else:
-                                fallback_text = config_dict.get("fallback_action", {}).get("error_tag_placeholder", "[HIBA]")
+                                fallback_text = "[UNVERIFIED] " + config_dict.get("fallback_action", {}).get("error_tag_placeholder", "[HIBA]")
                                 
                             state.final_sections[node.id] = fallback_text
                             state.completed_nodes.append(node.id)
-                            self.state_manager.log_action(session_id, "engine", "fallback_protocol_triggered", {
+                            self.state_manager.log_action(session_id, "engine", "g1d_degraded", {
                                 "node_id": node.id, 
                                 "retries_exhausted": retries - 1
                             })
