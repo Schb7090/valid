@@ -3,12 +3,14 @@ UPVS-Engine — Validator (4. Réteg, 2. rész)
 Egyetlen erős LLM (V2/V3) és determinisztikus + LLM-alapú Grounding (V1) ellenőrzése.
 """
 import re
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from models import TaskContext, ArgumentNode, SectionEvaluation, DelphiDraftResult, FactRecord
 from state_manager import StateManager
 from llm_utils import call_text, enforce_pydantic_schema
+from generator import get_facts_for_node
 
 class AtomicClaims(BaseModel):
     claims: List[str] = Field(description="A szöveg elemi (atomi) állításokra bontva. SZÓ SZERINTI részletek az eredeti szövegből.")

@@ -216,7 +216,7 @@ class StateManager:
         
         mem_file = base_dir / f"{agent_name}_memory.json"
         # Memória írás beillesztése a perzisztens queue-ba
-        data["timestamp"] = datetime.utcnow().isoformat()
+        data["timestamp"] = datetime.now().isoformat()
         self.submit_append_json(str(mem_file), data)
 
     # --- Cache Kezelő Metódusok ---
