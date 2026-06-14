@@ -324,7 +324,7 @@ def execute_research(graph: ArgumentGraph, context: TaskContext, state_manager: 
                         seen_author_ids.add(auth_id)
                 
                 # V11: Weighted Multi-Factor Confidence Scorer
-                current_year = datetime.utcnow().year
+                current_year = datetime.now().year
                 avg_authority = 0.0
                 avg_recency = 0.0
                 
